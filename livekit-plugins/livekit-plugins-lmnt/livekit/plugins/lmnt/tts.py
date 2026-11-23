@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 import aiohttp
+import numpy as np
 
 from livekit.agents import (
     APIConnectionError,
@@ -42,10 +43,28 @@ NUM_CHANNELS: Final[int] = 1
 MIME_TYPE: dict[str, str] = {
     "aac": "audio/aac",
     "mp3": "audio/mpeg",
-    "mulaw": "audio/basic",
-    "raw": "application/octet-stream",
+    # mulaw and raw come back without a header. raw is 16-bit little-endian PCM, and
+    # mulaw is decoded to it before it reaches the emitter
+    "mulaw": "audio/pcm",
+    "raw": "audio/pcm",
     "wav": "audio/wav",
 }
+
+
+def _build_mulaw_table() -> np.ndarray:
+    """Build an ITU-T G.711 mu-law to linear 16-bit PCM lookup table."""
+    table = np.zeros(256, dtype=np.int16)
+    for value in range(256):
+        encoded = (~value) & 0xFF
+        sign = -1 if encoded & 0x80 else 1
+        exponent = (encoded >> 4) & 0x07
+        mantissa = encoded & 0x0F
+        sample = ((mantissa << 3) + 0x84) << exponent
+        table[value] = sign * (sample - 0x84)
+    return table
+
+
+_MULAW_TABLE = _build_mulaw_table()
 
 
 @dataclass
@@ -249,6 +268,8 @@ class ChunkedStream(tts.ChunkedStream):
                     mime_type=MIME_TYPE[self._opts.format],
                 )
                 async for chunk, _ in resp.content.iter_chunks():
+                    if self._opts.format == "mulaw":
+                        chunk = _MULAW_TABLE[np.frombuffer(chunk, dtype=np.uint8)].tobytes()
                     output_emitter.push(chunk)
 
                 output_emitter.flush()
